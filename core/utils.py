@@ -2,13 +2,101 @@ import os
 import re
 import time
 import threading
+import json
 import requests
 import math
+import appdirs
 from mutagen.id3 import ID3, APIC, TIT2, TPE1, TCON, COMM, TDRC, TYER, USLT, TXXX, error
 from mutagen.mp3 import MP3
 from mutagen.wave import WAVE
 import platform
 import subprocess
+
+
+# --- UUID cache ---
+# Persists {filepath: {"mtime": float, "uuid": str|None}} so repeated library
+# scans skip ID3 reads for files that haven't changed. Stale entries (file
+# missing) are pruned each save. None uuids are cached too — files without a
+# SUNO_UUID don't need to be re-parsed every run.
+
+_UUID_CACHE_LOCK = threading.Lock()
+_UUID_CACHE_PATH = os.path.join(
+    appdirs.user_data_dir("SunoSync", "InternetThot"),
+    "uuid_cache.json",
+)
+
+
+def _load_uuid_cache():
+    if not os.path.exists(_UUID_CACHE_PATH):
+        return {}
+    try:
+        with open(_UUID_CACHE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, OSError, ValueError):
+        return {}
+
+
+def _save_uuid_cache(cache):
+    try:
+        os.makedirs(os.path.dirname(_UUID_CACHE_PATH), exist_ok=True)
+        with open(_UUID_CACHE_PATH, "w", encoding="utf-8") as f:
+            json.dump(cache, f)
+    except OSError:
+        pass
+
+
+def _scan_with_uuid_cache(directory, exts):
+    """
+    Walk *directory* and return a dict {filepath: uuid_or_none} for every file
+    matching one of the *exts*. Uses _UUID_CACHE_PATH on disk; only re-reads ID3
+    when a file's mtime has changed.
+    """
+    if not os.path.exists(directory):
+        return {}
+
+    with _UUID_CACHE_LOCK:
+        cache = _load_uuid_cache()
+        result = {}
+        seen_paths = set()
+        dirty = False
+
+        for root, _dirs, files in os.walk(directory):
+            for fname in files:
+                if not fname.lower().endswith(exts):
+                    continue
+                filepath = os.path.join(root, fname)
+                seen_paths.add(filepath)
+                try:
+                    mtime = os.path.getmtime(filepath)
+                except OSError:
+                    continue
+
+                cached = cache.get(filepath)
+                if cached and cached.get("mtime") == mtime:
+                    result[filepath] = cached.get("uuid")
+                    continue
+
+                uuid = get_uuid_from_file(filepath)
+                cache[filepath] = {"mtime": mtime, "uuid": uuid}
+                result[filepath] = uuid
+                dirty = True
+
+        # Prune entries for files that no longer exist (or moved out of scope).
+        # Only prune entries that *would* have been included in this scan — i.e.
+        # under the same directory tree — so partial scans don't wipe siblings.
+        directory_norm = os.path.normpath(directory)
+        for stale in [
+            p for p in cache
+            if os.path.normpath(p).startswith(directory_norm) and p not in seen_paths
+        ]:
+            del cache[stale]
+            dirty = True
+
+        if dirty:
+            _save_uuid_cache(cache)
+
+        return result
 
 
 def open_file(path):
@@ -62,21 +150,10 @@ def get_uuid_from_file(filepath):
 def build_uuid_cache(directory):
     """
     Scan directory recursively and build a set of all UUIDs found in audio files.
-    Returns a set of UUID strings.
+    Returns a set of UUID strings. Backed by an mtime-keyed disk cache so
+    repeated scans skip ID3 reads for unchanged files.
     """
-    uuid_cache = set()
-    if not os.path.exists(directory):
-        return uuid_cache
-    
-    for root, dirs, files in os.walk(directory):
-        for filename in files:
-            if filename.lower().endswith(('.mp3', '.wav')):
-                filepath = os.path.join(root, filename)
-                uuid = get_uuid_from_file(filepath)
-                if uuid:
-                    uuid_cache.add(uuid)
-    
-    return uuid_cache
+    return {uuid for uuid in _scan_with_uuid_cache(directory, (".mp3", ".wav")).values() if uuid}
 
 
 def extract_genre_from_prompt(prompt_text):
@@ -544,21 +621,12 @@ def get_unique_filename(filename):
 
 
 def get_downloaded_uuids(directory):
-    uuids = set()
-    if not os.path.exists(directory):
-        return uuids
-
-    for root, dirs, files in os.walk(directory):
-        for fname in files:
-            if fname.lower().endswith(".mp3"):
-                try:
-                    audio = ID3(os.path.join(root, fname))
-                    for frame in audio.getall("TXXX"):
-                        if frame.desc == "SUNO_UUID":
-                            uuids.add(frame.text[0])
-                except:
-                    pass
-    return uuids
+    """
+    Return the set of SUNO_UUIDs found in .mp3 files under *directory*.
+    Backed by an mtime-keyed disk cache so repeated scans skip ID3 reads for
+    unchanged files.
+    """
+    return {uuid for uuid in _scan_with_uuid_cache(directory, (".mp3",)).values() if uuid}
 
 
 class RateLimiter:

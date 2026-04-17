@@ -51,6 +51,7 @@ if getattr(sys, 'frozen', False):
 from ui.widgets import WorkspaceBrowser
 from core.config_manager import ConfigManager
 from core.downloader import SunoDownloader
+from core.version import __version__ as APP_VERSION
 from ui.sidebar import Sidebar
 from ui.library import LibraryTab
 from ui.downloader_tab import DownloaderTab
@@ -428,31 +429,33 @@ class SunoSyncApp(ctk.CTk):
     
     def check_changelog(self):
         """Show changelog on first launch of new version."""
-        current_version = "2.1.3"
+        current_version = APP_VERSION
         last_version = None
         state_file = "window_state.json"
         data = {}
-        
+
         if os.path.exists(state_file):
             try:
                 with open(state_file, "r") as f:
                     data = json.load(f)
                     last_version = data.get("version")
-            except:
+            except (json.JSONDecodeError, OSError):
                 pass
-        
+
         if last_version != current_version:
-            messagebox.showinfo("What's New in v2.0", 
-                "🎉 Welcome to SunoSync v2.0! 🎉\n\n"
+            messagebox.showinfo(
+                f"What's New in v{current_version}",
+                f"🎉 Welcome to SunoSync v{current_version}! 🎉\n\n"
                 "• Redesigned UI with CustomTkinter\n"
                 "• Improved Stability\n"
-                "• Better Configuration Management")
-            
+                "• Better Configuration Management",
+            )
+
             data["version"] = current_version
             try:
                 with open(state_file, "w") as f:
                     json.dump(data, f)
-            except:
+            except OSError:
                 pass
 
     def load_window_state(self):
@@ -462,14 +465,14 @@ class SunoSyncApp(ctk.CTk):
                     data = json.load(f)
                     geometry = data.get("geometry", "1100x750")
                     self.geometry(geometry)
-        except:
+        except (json.JSONDecodeError, OSError):
             pass
-            
+
     def on_close(self):
         try:
             with open("window_state.json", "w") as f:
                 json.dump({"geometry": self.geometry()}, f)
-        except:
+        except OSError:
              pass
              
         if "downloader" in self.views:
@@ -485,7 +488,13 @@ class SunoSyncApp(ctk.CTk):
 
         if hasattr(self, 'token_server'):
             self.token_server.stop()
-                
+
+        if hasattr(self, 'config_manager'):
+            try:
+                self.config_manager.flush()
+            except Exception:
+                pass
+
         self.destroy()
         sys.exit()
 

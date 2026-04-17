@@ -57,10 +57,12 @@ class PlayerWidget(ctk.CTkFrame):
         
         # UI
         self._create_widgets()
-        
+
         # Update Loop
+        self._update_loop_id = None
+        self._destroyed = False
         self._update_loop()
-        
+
         # Listeners
         self._track_listeners = []
 
@@ -80,6 +82,14 @@ class PlayerWidget(ctk.CTkFrame):
                 print(f"Error in track listener: {e}")
 
     def destroy(self):
+        self._destroyed = True
+        loop_id = getattr(self, "_update_loop_id", None)
+        if loop_id is not None:
+            try:
+                self.after_cancel(loop_id)
+            except Exception:
+                pass
+            self._update_loop_id = None
         if hasattr(self, 'discord'):
             self.discord.close()
         super().destroy()
@@ -594,14 +604,19 @@ class PlayerWidget(ctk.CTkFrame):
                 btn.configure(fg_color="transparent", text_color="gray")
 
     def _update_loop(self):
+        if getattr(self, "_destroyed", False):
+            return
         if self.is_playing and self.player:
             pos = self.player.get_position()
             if pos >= 0:
                 self.seek_var.set(pos * 100)
                 current = int(pos * self.duration)
                 self.time_label.configure(text=f"{current//60}:{current%60:02d} / {self.duration//60}:{self.duration%60:02d}")
-            
+
             if self.player.get_state() == vlc.State.Ended:
                  self.next_song()
-        
-        self.after(500, self._update_loop)
+
+        try:
+            self._update_loop_id = self.after(500, self._update_loop)
+        except tk.TclError:
+            self._update_loop_id = None

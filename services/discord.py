@@ -20,7 +20,6 @@ class DiscordRPC:
 
     def update_presence(self, track_title, artist, duration=None, current_time=None, is_paused=False):
         if not self.connected:
-            print("Discord RPC not connected, attempting to connect...")
             self.connect()
             if not self.connected:
                  return
@@ -29,13 +28,11 @@ class DiscordRPC:
             # Ensure strings are valid and at least 2 chars (Discord requirement)
             track_title = str(track_title)
             if len(track_title) < 2:
-                track_title += " " 
-                
+                track_title += " "
+
             artist_str = f"by {artist}" if artist else "Unknown Artist"
             if len(artist_str) < 2:
                 artist_str += " "
-
-            print(f"[DiscordRPC] Updating presence: '{track_title}' - '{artist_str}' (Paused: {is_paused})")
 
             if is_paused:
                 self.rpc.update(

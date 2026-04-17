@@ -561,7 +561,10 @@ class LibraryTab(ctk.CTkFrame):
             
         # Text filter
         if query:
-            self.filtered_songs = [s for s in candidates if query in s['title'].lower() or query in s['artist'].lower()]
+            self.filtered_songs = [
+                s for s in candidates
+                if query in s.get('title', '').lower() or query in s.get('artist', '').lower()
+            ]
         else:
             self.filtered_songs = list(candidates)
             

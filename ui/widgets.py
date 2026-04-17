@@ -290,7 +290,6 @@ class WorkspaceBrowser(ctk.CTkToplevel):
             
     def _create_item(self, parent, ws):
         name = ws.get("name", "Untitled")
-        name = ws.get("name", "Untitled")
         # Check various keys for count
         count = ws.get('clip_count') or ws.get('num_tracks') or ws.get('total_clips') or ws.get('num_total_results') or ws.get('size') or 0
         date = ws.get('updated_at', '')[:10]

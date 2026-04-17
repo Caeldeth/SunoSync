@@ -20,27 +20,35 @@ class StdoutCapture:
         self.tab = tab_instance
         try:
             self.original_stdout = sys.stdout if sys.stdout else sys.__stdout__
-        except:
+        except Exception:
             self.original_stdout = sys.__stdout__
         self.buffer = ""
-    
+
     def write(self, text):
         try:
             if self.original_stdout:
                 self.original_stdout.write(text)
                 self.original_stdout.flush()
-        except:
+        except Exception:
             pass
-        
-        if text:
-            self.tab.add_debug_log(text)
+
+        if text and self.tab is not None:
+            try:
+                self.tab.add_debug_log(text)
+            except Exception:
+                # Tab destroyed or otherwise unavailable; drop the line.
+                self.tab = None
 
     def flush(self):
         try:
             if self.original_stdout:
                 self.original_stdout.flush()
-        except:
+        except Exception:
             pass
+
+    def detach(self):
+        """Stop forwarding to the tab; keep tee'd writes to the original stream."""
+        self.tab = None
 
 class DownloaderTab(ctk.CTkFrame):
     def __init__(self, parent, config_manager, **kwargs):
@@ -62,7 +70,9 @@ class DownloaderTab(ctk.CTkFrame):
         self.card_bg = "#181818"
         
         # Debug Log Capture
-        sys.stdout = StdoutCapture(self)
+        self._stdout_capture = StdoutCapture(self)
+        self._original_stdout = sys.stdout
+        sys.stdout = self._stdout_capture
         
         # UI Setup
         self._setup_layout()
@@ -434,8 +444,6 @@ class DownloaderTab(ctk.CTkFrame):
             # Reset internal preloaded songs
             self.preloaded_songs.clear()
             self.clear_queue()
-            self.preloaded_songs.clear()
-            self.clear_queue()
             messagebox.showinfo("Cache Cleared", "Queue cleared.\nDownload history is based on files in the current folder.\nTo re-download existing songs, enable 'Force Rescan'.")
         except Exception as e:
             messagebox.showerror("Error", str(e))
@@ -567,8 +575,12 @@ class DownloaderTab(ctk.CTkFrame):
             pass
         except Exception:
             pass
-            
-        self.after(50, self._process_gui_queue)
+
+        try:
+            if self.winfo_exists():
+                self.after(50, self._process_gui_queue)
+        except tk.TclError:
+            pass
 
     def update_status(self, text, state="normal"):
         colors = {"normal": "#10b981", "busy": "#8b5cf6", "error": "#ef4444"}
@@ -688,3 +700,18 @@ class DownloaderTab(ctk.CTkFrame):
 
     def on_close(self):
         self.downloader.stop()
+        self._restore_stdout()
+
+    def _restore_stdout(self):
+        capture = getattr(self, "_stdout_capture", None)
+        if capture is not None:
+            capture.detach()
+        original = getattr(self, "_original_stdout", None)
+        if original is not None and sys.stdout is capture:
+            sys.stdout = original
+
+    def destroy(self):
+        try:
+            self._restore_stdout()
+        finally:
+            super().destroy()

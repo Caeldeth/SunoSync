@@ -1,9 +1,10 @@
 import requests
 import threading
 
+from core.version import __version__ as CURRENT_VERSION
+
 # Configuration
 VERSION_URL = "https://gist.githubusercontent.com/sunsetsacoustic/8e1e343e6c99b7487e5aa293f9b1e16a/raw/version.json"
-CURRENT_VERSION = "2.1.3"
 
 class Updater:
     @staticmethod
