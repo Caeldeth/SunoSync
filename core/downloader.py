@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 import threading
 import re
 
-from core.utils import RateLimiter, get_downloaded_uuids, embed_metadata, sanitize_filename, get_unique_filename
+from core.utils import RateLimiter, get_downloaded_uuids, embed_metadata, sanitize_filename, get_unique_filename, reserve_unique_path
 
 GEN_API_BASE = "https://studio-api.prod.suno.com"
 
@@ -45,6 +45,10 @@ class DownloaderSignals:
         self.song_updated = Signal((str, str, int))   # uuid, status, progress
         self.song_finished = Signal((str, bool, str)) # uuid, success, filepath
         self.song_found = Signal((dict,))             # metadata (for preload)
+        # Preload summary: emitted once at end of a scan_only run with bucket
+        # counts/lists so the UI can offer "Re-download Missing" actions.
+        # Shape: {"new": [meta...], "on_disk": [meta...], "missing_on_disk": [meta...], "trashed": [meta...]}
+        self.preload_summary = Signal((dict,))
 
 
 class SunoDownloader:
@@ -54,11 +58,14 @@ class SunoDownloader:
         "(percussion)", "(keyboard)", "(guitar)"
     ]
 
-    def __init__(self):
+    def __init__(self, manifest=None):
         self.signals = DownloaderSignals()
         self.stop_event = threading.Event()
         self.config = {}
         self.rate_limiter = RateLimiter(0.0)
+        # When set, dedupe and post-download bookkeeping use the manifest
+        # instead of walking the directory for ID3 tags.
+        self.manifest = manifest
 
     def configure(self, token, directory, max_pages, start_page, 
                   organize_by_month, embed_metadata_enabled, prefer_wav, download_delay, 
@@ -135,7 +142,10 @@ class SunoDownloader:
         filters = self.config.get("filter_settings", {})
         
         headers = {"Authorization": f"Bearer {token}"}
-        existing_uuids = get_downloaded_uuids(directory)
+        if self.manifest is not None:
+            existing_uuids = self.manifest.dedupe_set()
+        else:
+            existing_uuids = get_downloaded_uuids(directory)
 
         # Shared Subfolder Logic (for both Mode 1 and 2)
         workspace_id = filters.get("workspace_id")
@@ -274,16 +284,21 @@ class SunoDownloader:
             self.signals.status_changed.emit("Fetching List...")
             self._log("Fetching song list...", "info")
             
-            # Build UUID cache from existing files for duplicate detection
-            # Build UUID cache from existing files for duplicate detection
+            # Build UUID cache for duplicate detection.
             if self.config.get("force_rescan"):
-                 self._log("Force Rescan Active: Skipping local file cache build.", "warning")
-                 uuid_cache = set()
+                self._log("Force Rescan Active: Skipping dedupe cache.", "warning")
+                uuid_cache = set()
+            elif self.manifest is not None:
+                uuid_cache = self.manifest.dedupe_set()
+                self._log(f"Manifest dedupe: {len(uuid_cache)} known UUIDs.", "info")
             else:
                 self._log(f"Building UUID cache from: {directory}", "info")
                 from core.utils import build_uuid_cache
                 uuid_cache = build_uuid_cache(directory)
                 self._log(f"Found {len(uuid_cache)} existing songs in cache.", "info")
+
+            # Preload summary buckets (only meaningful in scan_only mode).
+            preload_summary = {"new": [], "on_disk": [], "missing_on_disk": [], "trashed": []}
             
             consecutive_skipped_pages = 0
             # Adaptive threshold: scale with library size
@@ -433,6 +448,12 @@ class SunoDownloader:
                         self._log(f"Parsed {len(raw_items)} items from playlist response", "info")
                         if len(raw_items) == 0:
                             self._log(f"WARNING: No items found in playlist response. Response type: {type(data)}, Keys: {list(data.keys()) if isinstance(data, dict) else 'Not a dict'}", "warning")
+
+                    # End-of-feed: an empty page means we've exhausted Suno's feed.
+                    # Stop here rather than paginating forever against an empty endpoint.
+                    if not is_playlist and not raw_items:
+                        self._log(f"Page {page_num} returned no items — reached end of feed. Stopping.", "success")
+                        break
 
                     filtered_clips = []
 
@@ -596,14 +617,28 @@ class SunoDownloader:
                         # Extract UUID
                         uuid = song_data.get("id")
 
-                        # 9. Duplicate Check (Metadata-Based)
+                        # 9. Duplicate Check + Preload Classification
                         if uuid and uuid in uuid_cache:
                             skipped_count += 1
-                            # self._log(f"Skipping {title} (UUID found in cache)", "info") 
+                            # In scan_only mode, classify the skip so the UI
+                            # can later offer to re-download files that the
+                            # manifest claims exist but disk says don't.
+                            if scan_only and self.manifest is not None:
+                                if uuid in self.manifest.trashed:
+                                    preload_summary["trashed"].append(song_data)
+                                else:
+                                    entry = self.manifest.entries.get(uuid)
+                                    fp = entry.get("filepath", "") if entry else ""
+                                    if fp and os.path.exists(fp):
+                                        preload_summary["on_disk"].append(song_data)
+                                    else:
+                                        preload_summary["missing_on_disk"].append(song_data)
                             continue
 
                         # E. SUCCESS
                         filtered_clips.append(song_data)
+                        if scan_only:
+                            preload_summary["new"].append(song_data)
 
 
                     if skipped_count > 0:
@@ -695,7 +730,15 @@ class SunoDownloader:
             self.signals.status_changed.emit("Complete")
         else:
             self.signals.status_changed.emit("Error")
-            
+
+        # Emit the preload summary before download_complete so the UI can
+        # render the breakdown banner before re-enabling the buttons.
+        if scan_only:
+            try:
+                self.signals.preload_summary.emit(preload_summary)
+            except Exception:
+                pass
+
         self.signals.download_complete.emit(success)
 
     def fetch_workspaces(self, token):
@@ -855,9 +898,15 @@ class SunoDownloader:
 
         ext = file_ext or ".mp3"
         fname = sanitize_filename(title) + ext
-        out_path = os.path.join(target_dir, fname)
-        if os.path.exists(out_path):
-            out_path = get_unique_filename(out_path)
+        # Atomic reservation prevents concurrent download threads from picking
+        # the same filename for two distinct UUIDs and silently clobbering each
+        # other (manifest ends up with duplicate entries pointing at one file).
+        try:
+            out_path = reserve_unique_path(os.path.join(target_dir, fname))
+        except (RuntimeError, OSError) as exc:
+            self._log(f"Failed to reserve filename for {title}: {exc}", "error")
+            self.signals.song_updated.emit(uuid, "Error", 0)
+            return
 
         self._log(f"Downloading: {title}", "downloading", thumbnail_data=thumb_data)
         self.signals.song_updated.emit(uuid, "Downloading", 0)
@@ -938,7 +987,16 @@ class SunoDownloader:
                 )
             
             existing_uuids.add(uuid)
-            
+            if self.manifest is not None:
+                from core.manifest import LOCATION_DOWNLOADS
+                self.manifest.add(
+                    uuid,
+                    title=title or "",
+                    artist=display_name or "",
+                    filepath=out_path,
+                    location=LOCATION_DOWNLOADS,
+                )
+
             # Save Artwork separately (Design Doc Item 3)
             # We want to ensure Windows Explorer shows it.
             if thumb_data:

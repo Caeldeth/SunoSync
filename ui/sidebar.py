@@ -45,7 +45,9 @@ class Sidebar(ctk.CTkFrame):
         # Navigation Items (Top)
         self._add_nav_item("Dashboard", "🏠", "dashboard", parent=self.nav_container)
         self._add_nav_item("Downloader", "⬇", "downloader", parent=self.nav_container)
+        self._add_nav_item("Downloads", "📥", "downloads", parent=self.nav_container)
         self._add_nav_item("Library", "🎵", "library", parent=self.nav_container)
+        self._add_nav_item("Ignored", "🚫", "ignored", parent=self.nav_container)
         self._add_nav_item("Prompt Vault", "📓", "vault", parent=self.nav_container)
         
         # Settings (Bottom)

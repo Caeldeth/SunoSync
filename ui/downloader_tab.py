@@ -50,12 +50,29 @@ class StdoutCapture:
         """Stop forwarding to the tab; keep tee'd writes to the original stream."""
         self.tab = None
 
+# Cap how many SongCards we render at once during preload. Tk + CTk choke when
+# you pack hundreds of widgets in rapid bursts (cards briefly flash at root
+# coords during layout, looking like UI escaping the window). All found songs
+# still go into preloaded_songs and download on Start; this is purely a render
+# throttle. "Show More" reveals the next page.
+PRELOAD_RENDER_CAP = 100
+
+
 class DownloaderTab(ctk.CTkFrame):
-    def __init__(self, parent, config_manager, **kwargs):
+    def __init__(self, parent, config_manager, manifest=None, **kwargs):
         super().__init__(parent, fg_color="transparent", **kwargs)
-        
+
         self.config_manager = config_manager
-        self.downloader = SunoDownloader()
+        self.manifest = manifest
+        self.downloader = SunoDownloader(manifest=manifest)
+        # Preload pagination state — see PRELOAD_RENDER_CAP.
+        self._preload_pending = []   # metadata dicts found beyond the render cap
+        self._preload_rendered = 0
+        self._preload_banner = None
+        self._preload_more_btn = None
+        # Preload summary state (populated when downloader emits preload_summary).
+        self._preload_summary = None
+        self._preload_summary_widget = None
         
         # State
         self.gui_queue = queue.Queue()
@@ -410,18 +427,19 @@ class DownloaderTab(ctk.CTkFrame):
         if not self.token_var.get():
             messagebox.showwarning("Error", "No token set")
             return
-            
+
         self.is_preloaded = True
         self.preloaded_songs.clear()
+        self._reset_preload_render_state()
         self.clear_queue()
-        
+
         self.update_status("Scanning...", "busy")
         self.toggle_inputs(False) # Enable Stop button
         self.save_config()
-        
+
         # Configure downloader for SCAN ONLY
         self._configure_downloader(scan_only=True)
-        
+
         # Connect signals (Required for UI updates)
         self.downloader.signals.download_complete.connect(self.on_download_complete)
         self.downloader.signals.song_found.connect(self.on_song_found)
@@ -430,8 +448,129 @@ class DownloaderTab(ctk.CTkFrame):
         self.downloader.signals.song_finished.connect(self.on_song_finished)
         self.downloader.signals.status_changed.connect(lambda msg: self.update_status(msg, "busy"))
         self.downloader.signals.log_message.connect(lambda msg, type, _: self.log(msg, type))
-        
+        self.downloader.signals.error_occurred.connect(self._on_downloader_error)
+        self.downloader.signals.preload_summary.connect(self._on_preload_summary)
+
         threading.Thread(target=self.downloader.run, daemon=True).start()
+
+    def _ignore_song(self, uuid):
+        """Permanently dismiss a song from the preload list. Removes the card,
+        adds the UUID to the manifest's trashed set so it never resurfaces."""
+        if self.manifest is None or not uuid:
+            return
+        meta = self.preloaded_songs.get(uuid, {}) or {}
+        title = meta.get("title", "") or ""
+        artist = meta.get("display_name", "") or meta.get("artist", "") or ""
+        self.manifest.trash(uuid, title=title, artist=artist)
+        self.preloaded_songs.pop(uuid, None)
+        card = self.queue_items.pop(uuid, None)
+        if card is not None:
+            try:
+                card.destroy()
+            except Exception:
+                pass
+
+    def _on_preload_summary(self, summary):
+        """Cache the summary and schedule rendering on the UI thread."""
+        self._preload_summary = summary
+        try:
+            self.after(0, self._render_preload_summary)
+        except Exception:
+            pass
+
+    def _render_preload_summary(self):
+        summary = self._preload_summary or {}
+        new_n = len(summary.get("new", []))
+        on_disk_n = len(summary.get("on_disk", []))
+        missing_n = len(summary.get("missing_on_disk", []))
+        trashed_n = len(summary.get("trashed", []))
+        total = new_n + on_disk_n + missing_n + trashed_n
+
+        # Tear down any existing widget — clear_queue may have already done it,
+        # but we re-render whenever the summary changes.
+        if self._preload_summary_widget is not None and self._preload_summary_widget.winfo_exists():
+            try:
+                self._preload_summary_widget.destroy()
+            except Exception:
+                pass
+        self._preload_summary_widget = None
+
+        if not total or not self.queue_list_frame.winfo_exists():
+            return
+
+        # Build the panel and pack it at the very top of the queue.
+        panel = ctk.CTkFrame(self.queue_list_frame, fg_color="#0f172a", corner_radius=8)
+        # Pack before the first existing child so it lands above the cards.
+        first_child = next(iter(self.queue_list_frame.winfo_children()), None)
+        if first_child is not None:
+            panel.pack(fill="x", padx=8, pady=(6, 4), before=first_child)
+        else:
+            panel.pack(fill="x", padx=8, pady=(6, 4))
+        self._preload_summary_widget = panel
+
+        header = ctk.CTkLabel(
+            panel, text=f"Preload found {total} songs in this scope",
+            font=("Inter", 13, "bold"), text_color="#e2e8f0",
+        )
+        header.pack(anchor="w", padx=12, pady=(8, 2))
+
+        breakdown = ctk.CTkFrame(panel, fg_color="transparent")
+        breakdown.pack(fill="x", padx=12, pady=(0, 6))
+        for color, label, count in [
+            ("#22c55e", "new", new_n),
+            ("#94a3b8", "already on disk", on_disk_n),
+            ("#fbbf24", "missing on disk", missing_n),
+            ("#7f1d1d", "trashed", trashed_n),
+        ]:
+            chip = ctk.CTkLabel(
+                breakdown, text=f"{count} {label}",
+                font=("Inter", 11), text_color=color,
+            )
+            chip.pack(side="left", padx=(0, 12))
+
+        # Action: re-download missing-on-disk entries.
+        if missing_n:
+            actions = ctk.CTkFrame(panel, fg_color="transparent")
+            actions.pack(fill="x", padx=12, pady=(0, 8))
+            ctk.CTkButton(
+                actions, text=f"Queue {missing_n} missing for re-download",
+                fg_color="#fbbf24", hover_color="#f59e0b", text_color="#1f2937",
+                font=("Inter", 11, "bold"),
+                command=self._requeue_missing_on_disk,
+            ).pack(side="left")
+
+    def _requeue_missing_on_disk(self):
+        """Drop manifest entries for the missing-on-disk batch (so they're no
+        longer dedupe-blocked) and render their cards in the preload list, so
+        the user can hit Start Download to re-grab them."""
+        if not self._preload_summary or self.manifest is None:
+            return
+        missing = list(self._preload_summary.get("missing_on_disk", []))
+        if not missing:
+            return
+        uuids = [m.get("id") for m in missing if m.get("id")]
+        self.manifest.forget_uuids(uuids)
+        # Add them as preload entries so Start Download will include them.
+        for meta in missing:
+            self._add_song_card(meta)
+        # Empty the missing bucket and re-render the summary so the count drops.
+        self._preload_summary["missing_on_disk"] = []
+        self._render_preload_summary()
+        messagebox.showinfo(
+            "Queued for Re-download",
+            f"Queued {len(uuids)} previously-downloaded songs. "
+            "Click Start Download to fetch them.",
+        )
+
+    def _on_downloader_error(self, message):
+        """Surface downloader errors to the user. Marshalled to the UI thread."""
+        def _show():
+            self.update_status(message, "error")
+            messagebox.showerror("Download Error", message)
+        try:
+            self.after(0, _show)
+        except Exception:
+            pass
 
     def clear_uuid_cache(self):
         try:
@@ -453,16 +592,19 @@ class DownloaderTab(ctk.CTkFrame):
         
         target_list = []
         if self.is_preloaded:
-            # Collect checked items
-            for uuid, card in self.queue_items.items():
-                if card.selected_var.get():
-                    # We need metadata. preloaded_songs has it.
-                    if uuid in self.preloaded_songs:
-                        target_list.append(self.preloaded_songs[uuid])
-            
-            if not target_list and self.queue_items:
-                 messagebox.showinfo("Info", "No songs selected.")
-                 return
+            # Iterate the full preloaded_songs dict (which holds every song
+            # found, including those beyond the render cap). For each:
+            #   - If a card exists and is unchecked, skip it (user opted out).
+            #   - Otherwise (no card rendered, or card checked), include it.
+            for uuid, meta in self.preloaded_songs.items():
+                card = self.queue_items.get(uuid)
+                if card is not None and not card.selected_var.get():
+                    continue
+                target_list.append(meta)
+
+            if not target_list and self.preloaded_songs:
+                messagebox.showinfo("Info", "No songs selected.")
+                return
 
         self.update_status("Downloading...", "busy")
         self.toggle_inputs(False)
@@ -486,7 +628,8 @@ class DownloaderTab(ctk.CTkFrame):
         self.downloader.signals.song_updated.connect(self.on_song_updated)
         self.downloader.signals.song_finished.connect(self.on_song_finished)
         self.downloader.signals.progress_updated.connect(self.on_progress_updated)
-        
+        self.downloader.signals.error_occurred.connect(self._on_downloader_error)
+
         threading.Thread(target=self.downloader.run, daemon=True).start()
         
     def on_progress_updated(self, percent):
@@ -521,10 +664,13 @@ class DownloaderTab(ctk.CTkFrame):
         c = self.config_manager
         base_path = os.getcwd()
         default_path = os.path.join(base_path, "Suno_Downloads")
-            
+        # Prefer the new downloads_path, fall back to legacy `path` for users
+        # whose migration ran but who haven't split paths yet.
+        target_dir = c.get("downloads_path") or c.get("path") or default_path
+
         self.downloader.configure(
             token=self.token_var.get(),
-            directory=c.get("path", default_path),
+            directory=target_dir,
             max_pages=self.max_pages_var.get(),
             start_page=max(1, self.start_page_var.get()), # Enforce minimum 1
             organize_by_month=c.get("organize", False),
@@ -543,9 +689,11 @@ class DownloaderTab(ctk.CTkFrame):
     # --- GUI Queue Processing ---
     def _process_gui_queue(self):
         try:
-            # Process up to 50 items at a time to keep UI responsive
+            # Process a small batch per tick. Each `add_song` builds a SongCard
+            # widget on the main thread; large batches cause visible UI hitching.
+            # 15/50ms = ~300/sec, plenty for the typical preload list size.
             count = 0
-            while not self.gui_queue.empty() and count < 50:
+            while not self.gui_queue.empty() and count < 15:
                 msg = self.gui_queue.get_nowait()
                 action = msg[0]
                 if action == "status":
@@ -643,39 +791,118 @@ class DownloaderTab(ctk.CTkFrame):
         for w in self.queue_list_frame.winfo_children():
             w.destroy()
         self.queue_items.clear()
-        
+        self._reset_preload_render_state()
+
         # Re-add empty state
         self.empty_state = EmptyStateWidget(self.queue_list_frame, theme={})
         self.empty_state.pack(fill="both", expand=True, pady=40)
+
+    def _reset_preload_render_state(self):
+        self._preload_pending = []
+        self._preload_rendered = 0
+        self._preload_banner = None
+        self._preload_more_btn = None
+        self._preload_summary = None
+        self._preload_summary_widget = None
         
     def _add_song_card(self, metadata):
         try:
+            uuid = metadata.get("id")
+            if not uuid:
+                return
+            # Always remember the song so download includes it, even if we
+            # don't render its card (preload cap).
+            if self.is_preloaded:
+                self.preloaded_songs[uuid] = metadata
+
+            if uuid in self.queue_items:
+                return
+
+            # Preload cap: stash overflow, render a banner + Show More button
+            # instead of packing more cards. Non-preload (active download) flows
+            # are unaffected — we always want to see those.
+            if self.is_preloaded and self._preload_rendered >= PRELOAD_RENDER_CAP:
+                self._preload_pending.append(metadata)
+                self._update_preload_banner()
+                return
+
             # Remove empty state if present
             if hasattr(self, 'empty_state') and self.empty_state.winfo_exists():
                 self.empty_state.destroy()
-                
-            uuid = metadata.get("id")
-            if uuid in self.queue_items: return
-            
+
             # Verify frame exists
             if not self.queue_list_frame.winfo_exists():
                 print("Error: Queue list frame does not exist!")
                 return
 
-            card = SongCard(self.queue_list_frame, uuid, metadata.get("title", "Unknown"), 
-                            metadata=metadata, bg_color="#181818")
-            card.pack(fill="x", pady=2, padx=5)
-            self.queue_items[uuid] = card
-            
-            if self.is_preloaded:
-                self.preloaded_songs[uuid] = metadata
-
-            # Fetch thumb?
-            if metadata.get("image_url"):
-                 self.fetch_thumb(uuid, metadata.get("image_url"))
+            self._render_song_card(metadata)
         except Exception as e:
             print(f"Error adding song card: {e}")
             self.log(f"UI Error: Failed to add card: {e}", "error")
+
+    def _render_song_card(self, metadata):
+        """Actually build and pack the SongCard widget. Caller must already
+        have decided that rendering is allowed (cap, dedupe, etc)."""
+        uuid = metadata.get("id")
+        ignore_cb = self._ignore_song if (self.is_preloaded and self.manifest is not None) else None
+        card = SongCard(self.queue_list_frame, uuid, metadata.get("title", "Unknown"),
+                        metadata=metadata, bg_color="#181818", on_ignore=ignore_cb)
+        card.pack(fill="x", pady=2, padx=5)
+        self.queue_items[uuid] = card
+        if self.is_preloaded:
+            self._preload_rendered += 1
+
+        # Defer thumbnail fetching during preload (see preload_songs comment).
+        if metadata.get("image_url") and not self.is_preloaded:
+            self.fetch_thumb(uuid, metadata.get("image_url"))
+
+    def _update_preload_banner(self):
+        """Show/refresh the 'showing N of M' banner at the top of the queue."""
+        total = self._preload_rendered + len(self._preload_pending)
+        text = (
+            f"Showing first {self._preload_rendered} of {total} songs found. "
+            f"All {total} will download when you click Start."
+        )
+        if self._preload_banner is None or not self._preload_banner.winfo_exists():
+            self._preload_banner = ctk.CTkLabel(
+                self.queue_list_frame, text=text,
+                font=("Inter", 11, "bold"), text_color="#fbbf24",
+                wraplength=800, justify="left",
+            )
+            # Force the banner to the top via packing order
+            self._preload_banner.pack(fill="x", pady=(4, 2), padx=8, before=next(iter(self.queue_items.values())) if self.queue_items else None)
+        else:
+            self._preload_banner.configure(text=text)
+
+        if self._preload_pending and (self._preload_more_btn is None or not self._preload_more_btn.winfo_exists()):
+            self._preload_more_btn = ctk.CTkButton(
+                self.queue_list_frame,
+                text=f"Show {min(PRELOAD_RENDER_CAP, len(self._preload_pending))} More",
+                fg_color="#8b5cf6", hover_color="#7c3aed", height=28,
+                command=self._show_more_preloaded,
+            )
+            self._preload_more_btn.pack(fill="x", pady=(2, 4), padx=8)
+        elif self._preload_pending and self._preload_more_btn is not None:
+            self._preload_more_btn.configure(
+                text=f"Show {min(PRELOAD_RENDER_CAP, len(self._preload_pending))} More"
+            )
+
+    def _show_more_preloaded(self):
+        """Render the next batch of pending preload songs."""
+        batch = self._preload_pending[:PRELOAD_RENDER_CAP]
+        self._preload_pending = self._preload_pending[PRELOAD_RENDER_CAP:]
+        # Destroy the More button so it doesn't shadow the new cards in pack
+        # order — _update_preload_banner will rebuild it below the cards if
+        # there's still pending overflow.
+        if self._preload_more_btn is not None and self._preload_more_btn.winfo_exists():
+            self._preload_more_btn.destroy()
+        self._preload_more_btn = None
+        for metadata in batch:
+            try:
+                self._render_song_card(metadata)
+            except Exception as e:
+                print(f"Error rendering pending card: {e}")
+        self._update_preload_banner()
         
     def open_debug_window(self):
         if self.debug_window and self.debug_window.winfo_exists():
@@ -694,7 +921,7 @@ class DownloaderTab(ctk.CTkFrame):
             
     def check_initial_path(self):
         """Ensure a download path is configured on startup."""
-        path = self.config_manager.get("path", "")
+        path = self.config_manager.get("downloads_path") or self.config_manager.get("path", "")
         if not path:
             pass  # Could prompt user to set a path
 

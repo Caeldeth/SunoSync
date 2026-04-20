@@ -47,12 +47,13 @@ class CollapsibleCard(ctk.CTkFrame):
 
 
 class SongCard(ctk.CTkFrame):
-    def __init__(self, parent, uuid, title, thumbnail_data=None, metadata=None, bg_color="transparent", show_checkbox=True, **kwargs):
+    def __init__(self, parent, uuid, title, thumbnail_data=None, metadata=None, bg_color="transparent", show_checkbox=True, on_ignore=None, **kwargs):
         super().__init__(parent, fg_color=bg_color, **kwargs)
         self.uuid = uuid
         self.metadata = metadata or {}
         self.filepath = None
-        
+        self.on_ignore = on_ignore
+
         self.columnconfigure(2, weight=1)
         
         self.selected_var = ctk.BooleanVar(value=True)
@@ -75,9 +76,21 @@ class SongCard(ctk.CTkFrame):
         self.title_label = ctk.CTkLabel(self, text=display_title, font=("Inter", 14, "bold"), anchor="w")
         self.title_label.grid(row=0, column=2, sticky="ew", padx=5, pady=(5, 0))
         
-        tags = self.metadata.get("tags", "Unknown Genre")
-        display_tags = tags if len(tags) < 50 else tags[:47] + "..."
-        self.subtitle_label = ctk.CTkLabel(self, text=display_tags, font=("Inter", 12), text_color="gray", anchor="w")
+        # Subtitle: tags · YYYY-MM-DD · short-uuid. The date + short UUID
+        # disambiguate Suno's frequent same-title duplicates so users can tell
+        # otherwise-identical preload rows apart.
+        parts = []
+        tags = self.metadata.get("tags") or ""
+        if tags:
+            parts.append(tags)
+        created = self.metadata.get("created_at") or ""
+        if created:
+            parts.append(created[:10])
+        if uuid:
+            parts.append(uuid[:8])
+        subtitle = " · ".join(parts) if parts else "Unknown"
+        display_subtitle = subtitle if len(subtitle) <= 80 else subtitle[:77] + "..."
+        self.subtitle_label = ctk.CTkLabel(self, text=display_subtitle, font=("Inter", 12), text_color="gray", anchor="w")
         self.subtitle_label.grid(row=1, column=2, sticky="ew", padx=5, pady=(0, 5))
         
         self.status_label = ctk.CTkLabel(self, text="Waiting", font=("Inter", 12))
@@ -86,6 +99,19 @@ class SongCard(ctk.CTkFrame):
         self.progress_bar = ctk.CTkProgressBar(self, width=100)
         
         self.action_btn = ctk.CTkButton(self, text="▶", width=30, height=30, fg_color="transparent", command=self.on_action)
+
+        if self.on_ignore is not None:
+            self.ignore_btn = ctk.CTkButton(
+                self, text="🚫", width=32, height=28,
+                fg_color="transparent", hover_color="#7f1d1d",
+                text_color="#94a3b8", font=("Inter", 12),
+                command=self._handle_ignore,
+            )
+            self.ignore_btn.grid(row=0, column=5, rowspan=2, padx=(2, 8), pady=5)
+
+    def _handle_ignore(self):
+        if self.on_ignore is not None:
+            self.on_ignore(self.uuid)
 
     def set_thumbnail(self, data):
         if not self.winfo_exists(): return

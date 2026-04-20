@@ -43,21 +43,37 @@ def create_settings_card(parent, app, base_path):
     card.pack(fill="x", pady=(0, 12))
     body = card.body
     
-    # --- Path Selection ---
-    ctk.CTkLabel(body, text="Download Folder", font=("Inter", 12, "bold"), text_color="gray").pack(anchor="w", padx=5, pady=(5, 0))
-            
+    # --- Downloads Path ---
+    ctk.CTkLabel(body, text="Downloads Folder", font=("Inter", 12, "bold"), text_color="gray").pack(anchor="w", padx=5, pady=(5, 0))
+    ctk.CTkLabel(body, text="Where new downloads land.", font=("Inter", 10), text_color="#64748b").pack(anchor="w", padx=5)
+
     path_row = ctk.CTkFrame(body, fg_color="transparent")
     path_row.pack(fill="x", padx=5, pady=5)
-    
+
     app.path_var = ctk.StringVar(value=os.path.join(base_path, "Suno_Downloads"))
-    app.path_display_var = ctk.StringVar() # Optional now if we bind directly, but keeping logic same
-    
-    # CTkEntry for path
+    app.path_display_var = ctk.StringVar()
+
     path_entry = ctk.CTkEntry(path_row, textvariable=app.path_display_var, state="readonly")
     path_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
-    
+
     browse_btn = ctk.CTkButton(path_row, text="Browse", command=app.browse_folder, width=80)
     browse_btn.pack(side="right")
+
+    # --- Library Path ---
+    ctk.CTkLabel(body, text="Library Folder", font=("Inter", 12, "bold"), text_color="gray").pack(anchor="w", padx=5, pady=(10, 0))
+    ctk.CTkLabel(body, text="Where curated keepers live (use \u201cAdd to Library\u201d in the Downloads tab).", font=("Inter", 10), text_color="#64748b").pack(anchor="w", padx=5)
+
+    library_row = ctk.CTkFrame(body, fg_color="transparent")
+    library_row.pack(fill="x", padx=5, pady=5)
+
+    app.library_path_var = ctk.StringVar(value=os.path.join(base_path, "Suno_Library"))
+    app.library_path_display_var = ctk.StringVar()
+
+    library_entry = ctk.CTkEntry(library_row, textvariable=app.library_path_display_var, state="readonly")
+    library_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
+
+    library_browse_btn = ctk.CTkButton(library_row, text="Browse", command=app.browse_library_folder, width=80)
+    library_browse_btn.pack(side="right")
 
     # --- Toggles Grid ---
     toggles_frame = ctk.CTkFrame(body, fg_color="transparent")

@@ -51,6 +51,7 @@ if getattr(sys, 'frozen', False):
 from ui.widgets import WorkspaceBrowser
 from core.config_manager import ConfigManager
 from core.downloader import SunoDownloader
+from core.manifest import LibraryManifest, LOCATION_LIBRARY
 from core.version import __version__ as APP_VERSION
 from ui.sidebar import Sidebar
 from ui.library import LibraryTab
@@ -177,7 +178,9 @@ class SunoSyncApp(ctk.CTk):
         self.geometry(default_geo)
 
         self.config_manager = ConfigManager(CONFIG_FILE)
-        
+        self.manifest = LibraryManifest()
+        self._run_path_migration()
+
         # Initialize Managers and Theme
         self.theme = ThemeManager() # Kept passing for tabs that still use it
         self.theme.apply_treeview_style()
@@ -294,7 +297,7 @@ class SunoSyncApp(ctk.CTk):
         # we aim to migrate them. For now, we pass 'self.content_area' which is a CTkFrame.
         
         try:
-            self.downloader = DownloaderTab(self.content_area, config_manager=self.config_manager)
+            self.downloader = DownloaderTab(self.content_area, config_manager=self.config_manager, manifest=self.manifest)
             self.views["downloader"] = self.downloader
             
             # For Library, we need the Player widget instance first?
@@ -306,11 +309,24 @@ class SunoSyncApp(ctk.CTk):
             self.player.grid(row=1, column=0, columnspan=2, sticky="ew")
             self.player.set_tags_file(TAGS_FILE)
 
-            self.library = LibraryTab(self.content_area, config_manager=self.config_manager, cache_file=CACHE_FILE, tags_file=TAGS_FILE)
+            self.library = LibraryTab(self.content_area, config_manager=self.config_manager, cache_file=CACHE_FILE, tags_file=TAGS_FILE, manifest=self.manifest)
             self.library.player_widget = self.player
             self.player.set_library_tab(self.library)
             self.views["library"] = self.library
-            
+
+            from ui.downloads_tab import DownloadsTab
+            self.downloads_view = DownloadsTab(
+                self.content_area,
+                config_manager=self.config_manager,
+                manifest=self.manifest,
+                player_widget=self.player,
+            )
+            self.views["downloads"] = self.downloads_view
+
+            from ui.ignored_tab import IgnoredTab
+            self.ignored_view = IgnoredTab(self.content_area, manifest=self.manifest)
+            self.views["ignored"] = self.ignored_view
+
             # --- New Tabs ---
             from ui.dashboard import DashboardTab
             from ui.vault import VaultTab
@@ -331,7 +347,7 @@ class SunoSyncApp(ctk.CTk):
             # Connect lyrics panel to player
             self.player.set_lyrics_panel(self.lyrics_panel)
             
-            self.settings = SettingsTab(self.content_area, config_manager=self.config_manager)
+            self.settings = SettingsTab(self.content_area, config_manager=self.config_manager, manifest=self.manifest)
             self.views["settings"] = self.settings
 
             # Connect Events
@@ -395,8 +411,10 @@ class SunoSyncApp(ctk.CTk):
             splash_window.destroy()
             self.deiconify()
             self.show_view("dashboard")
-            self.check_changelog()
-            
+            # Changelog popup disabled — feels noisy on every version bump.
+            # check_changelog() is kept defined below in case we want to wire
+            # it back in selectively (e.g., only on major versions).
+
         self.after(2000, end_splash)
 
     def show_view(self, view_name):
@@ -417,9 +435,10 @@ class SunoSyncApp(ctk.CTk):
             self.current_view = view
             self.sidebar.set_active(view_name)
             
-            # Refresh Dashboard/Vault on view switch
-            if view_name in ["dashboard", "vault"] and hasattr(view, 'refresh'):
+            # Refresh Dashboard/Vault/Downloads/Ignored on view switch
+            if view_name in ["dashboard", "vault", "downloads", "ignored"] and hasattr(view, 'refresh'):
                 view.refresh()
+
             
             # Refresh Settings/Downloader to ensure sync
             if view_name == "settings" and hasattr(view, 'load_settings'):
@@ -427,6 +446,56 @@ class SunoSyncApp(ctk.CTk):
             elif view_name == "downloader" and hasattr(view, 'load_config'):
                  view.load_config()
     
+    def _run_path_migration(self):
+        """One-shot migration from the legacy single `path` config key to the
+        Downloads/Library two-path model + manifest. Idempotent — safe to run
+        every launch; bails out if both new keys already exist."""
+        c = self.config_manager
+        legacy_path = c.get("path", "")
+        downloads_path = c.get("downloads_path", "")
+        library_path = c.get("library_path", "")
+
+        if downloads_path and library_path:
+            return  # Already migrated.
+
+        if not legacy_path or not os.path.isdir(legacy_path):
+            return  # No legacy path to migrate from; user will pick paths in Settings.
+
+        # Both downloads and library default to the same folder — zero-disruption
+        # for existing users; they can split later in Settings.
+        if not downloads_path:
+            c.set("downloads_path", legacy_path)
+        if not library_path:
+            c.set("library_path", legacy_path)
+
+        # Bootstrap the manifest by scanning the existing library and recording
+        # everything we find as `location=library`. Reuses the mtime-cached
+        # ID3 walker added in Phase 1.
+        if len(self.manifest) > 0:
+            return  # Manifest already populated (e.g., partial prior migration).
+
+        try:
+            from core.utils import _scan_with_uuid_cache
+            scanned = _scan_with_uuid_cache(legacy_path, (".mp3", ".wav"))
+        except Exception as e:
+            print(f"Migration scan failed: {e}")
+            return
+
+        added = 0
+        for filepath, uuid in scanned.items():
+            if not uuid:
+                continue
+            self.manifest.add(
+                uuid,
+                title=os.path.splitext(os.path.basename(filepath))[0],
+                artist="",
+                filepath=filepath,
+                location=LOCATION_LIBRARY,
+            )
+            added += 1
+        self.manifest.flush()
+        print(f"Migration: imported {added} existing UUIDs from {legacy_path} into the manifest.")
+
     def check_changelog(self):
         """Show changelog on first launch of new version."""
         current_version = APP_VERSION
@@ -492,6 +561,12 @@ class SunoSyncApp(ctk.CTk):
         if hasattr(self, 'config_manager'):
             try:
                 self.config_manager.flush()
+            except Exception:
+                pass
+
+        if hasattr(self, 'manifest'):
+            try:
+                self.manifest.flush()
             except Exception:
                 pass
 

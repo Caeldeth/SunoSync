@@ -33,8 +33,8 @@ SunoSync is the ultimate desktop ecosystem for your Suno AI music generation. It
 *   **Tag System**: Organize with Like 👍, Star ⭐, and Trash 🗑️.
 *   **Stats Dashboard**: View detailed analytics of your library (Top Genres, Monthly Activity, etc.).
 
-### 🔌 Chrome Extension Integration
-*   **Auto-Token Sync**: Never manually copy cookies again. The companion Chrome Extension automatically syncs your Suno session with the desktop app.
+### 🔌 Browser Extension Integration
+*   **Auto-Token Sync**: Never manually copy cookies again. Companion extensions for Chrome and Firefox automatically sync your Suno session with the desktop app.
 
 ### 📻 Suno On-Air & Mobile Bridge
 *   **Live Radio**: Broadcast your library as a live web radio station to share with friends.
@@ -50,17 +50,25 @@ SunoSync is the ultimate desktop ecosystem for your Suno AI music generation. It
 2.  **Install VLC**: Ensure [VLC Media Player](https://www.videolan.org/) is installed (required for audio engine).
 3.  **Run**: Double-click `SunoSync.exe`.
 4.  **Connect**:
-    *   **Option A (Easy)**: Install the SunoSync Chrome Extension. It will automatically detect the app and sync your token.
+    *   **Option A (Easy)**: Install the SunoSync browser extension (Chrome or Firefox — see below). It will automatically detect the app and sync your token.
     *   **Option B (Manual)**: Click "Get Token", log in to Suno.com, open DevTools -> Application -> Cookies, and copy the `__client` cookie.
 
-## � Chrome Extension (Auto-Auth)
+## 🔌 Browser Extension (Auto-Auth)
 
-SunoSync comes with a companion Chrome Extension that makes authentication automatic.
+SunoSync ships with companion extensions for Chrome and Firefox that make authentication automatic.
 
-1.  **Open Chrome Extensions**: Go to `chrome://extensions/`.
+### Chrome / Edge / other Chromium
+
+1.  **Open Extensions**: Go to `chrome://extensions/`.
 2.  **Enable Developer Mode**: Toggle the switch in the top right.
 3.  **Load Unpacked**: Click the button and select the `chrome_extension` folder inside the SunoSync directory.
-4.  **Done!**: The extension will now automatically detect when SunoSync is open and sync your session token. No more copy-pasting cookies!
+4.  **Done!**: The extension will now automatically detect when SunoSync is open and sync your session token.
+
+### Firefox (121+)
+
+1.  **Open Add-ons Debugging**: Go to `about:debugging#/runtime/this-firefox`.
+2.  **Load Temporary Add-on**: Click the button and select `firefox_extension/manifest.json`.
+3.  **Done!** — Note: temporary add-ons are removed when Firefox closes; for a persistent install you'll need a Mozilla-signed build (planned).
 
 ## 🔄 Updating SunoSync
 

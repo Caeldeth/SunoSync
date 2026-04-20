@@ -13,7 +13,22 @@ try:
 except (ImportError, OSError):
     VLC_AVAILABLE = False
 
-from services.discord import DiscordRPC
+# Discord RPC disabled — the bundled client_id belongs to someone else's
+# Discord application. Re-enable by restoring this import and the constructor
+# call below once a SunoSync-owned Discord app ID is in place.
+# from services.discord import DiscordRPC
+
+
+class _NullDiscord:
+    """No-op stand-in for DiscordRPC; matches the surface used by PlayerWidget."""
+    def update_presence(self, *args, **kwargs):
+        pass
+
+    def clear(self):
+        pass
+
+    def close(self):
+        pass
 
 class PlayerWidget(ctk.CTkFrame):
     """Audio player widget with playback controls."""
@@ -22,17 +37,51 @@ class PlayerWidget(ctk.CTkFrame):
         super().__init__(parent, fg_color=bg_color, corner_radius=0, height=90, **kwargs)
         
         # VLC Setup
+        # libvlc writes plugin-loader chatter (stale plugins.dat, missing optional
+        # transitive DLLs like libsrt/libx265) directly to FD 2, bypassing Python's
+        # sys.stderr redirect. Silence FD 2 around init so that user consoles stay
+        # readable. --no-video alone kills most of the spam (we never play video).
         self.instance = None
         self.player = None
         if VLC_AVAILABLE:
+            saved_fd = None
+            devnull_fd = None
             try:
-                self.instance = vlc.Instance('--no-xlib')
-                self.player = self.instance.media_player_new()
-            except Exception:
-                self.player = None
+                try:
+                    saved_fd = os.dup(2)
+                    devnull_fd = os.open(os.devnull, os.O_WRONLY)
+                    os.dup2(devnull_fd, 2)
+                except OSError:
+                    saved_fd = None
+                try:
+                    self.instance = vlc.Instance(
+                        '--quiet',
+                        '--no-video',
+                        '--no-stats',
+                        '--no-snapshot-preview',
+                    )
+                    self.player = self.instance.media_player_new()
+                except Exception:
+                    self.player = None
+            finally:
+                if saved_fd is not None:
+                    try:
+                        os.dup2(saved_fd, 2)
+                    except OSError:
+                        pass
+                    try:
+                        os.close(saved_fd)
+                    except OSError:
+                        pass
+                if devnull_fd is not None:
+                    try:
+                        os.close(devnull_fd)
+                    except OSError:
+                        pass
         
-        # Discord RPC
-        self.discord = DiscordRPC()
+        # Discord RPC disabled — see top-of-file note. Using a no-op stub so
+        # existing call sites (update_presence/close) keep working.
+        self.discord = _NullDiscord()
 
         # State
         self.current_file = None

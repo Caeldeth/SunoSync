@@ -16,13 +16,14 @@ logger = logging.getLogger(__name__)
 class LibraryTab(ctk.CTkFrame):
     """Library tab for browsing and playing downloaded songs."""
     
-    def __init__(self, parent, config_manager, cache_file=None, tags_file=None, **kwargs):
+    def __init__(self, parent, config_manager, cache_file=None, tags_file=None, manifest=None, **kwargs):
         super().__init__(parent, fg_color="transparent", **kwargs)
-        
+
         self.config_manager = config_manager
         self.cache_file = cache_file
         self.tags_file = tags_file
-        self.download_path = self.config_manager.get("path", "")
+        self.manifest = manifest
+        self.library_path = self.config_manager.get("library_path") or self.config_manager.get("path", "")
         
         self.all_songs = []
         self.filtered_songs = []
@@ -94,6 +95,25 @@ class LibraryTab(ctk.CTkFrame):
                       hover_color="#444444",
                       command=self.change_download_folder).pack(side="right", padx=5)
 
+        # Forget Missing — drops manifest entries whose files are gone, so
+        # those songs become re-downloadable. Distinct from Trash (permanent
+        # block).
+        ctk.CTkButton(self.toolbar, text="Forget Missing", width=120, height=28,
+                      corner_radius=14, fg_color="#475569",
+                      hover_color="#64748b", text_color="#FFFFFF",
+                      font=("Inter", 11),
+                      command=self.forget_missing).pack(side="right", padx=5)
+
+        # Rebuild — scans library_path for SUNO_UUID-tagged files and adds
+        # them to the manifest (or updates filepath if the file moved into a
+        # subfolder). Use after manual file moves or after deleting the
+        # manifest.
+        ctk.CTkButton(self.toolbar, text="Rebuild from Disk", width=130, height=28,
+                      corner_radius=14, fg_color="#475569",
+                      hover_color="#64748b", text_color="#FFFFFF",
+                      font=("Inter", 11),
+                      command=self.rebuild_from_disk).pack(side="right", padx=5)
+
         # Pagination Controls
         self.page_frame = ctk.CTkFrame(self.toolbar, fg_color="transparent")
         self.page_frame.pack(side="right", padx=10)
@@ -158,10 +178,10 @@ class LibraryTab(ctk.CTkFrame):
                 self.tags = {}
 
     def change_download_folder(self):
-        new_dir = filedialog.askdirectory(initialdir=self.download_path, title="Select Download Folder")
+        new_dir = filedialog.askdirectory(initialdir=self.library_path, title="Select Library Folder")
         if new_dir:
-            self.download_path = new_dir
-            self.config_manager.set("path", new_dir)
+            self.library_path = new_dir
+            self.config_manager.set("library_path", new_dir)
             self.refresh_library()
             messagebox.showinfo("Folder Changed", f"Library folder updated to:\n{new_dir}")
         else:
@@ -198,16 +218,16 @@ class LibraryTab(ctk.CTkFrame):
             
             self.render_page()
             
-            self.download_path = self.config_manager.get("path", "")
-            
-            if not self.download_path or not os.path.exists(self.download_path):
+            self.library_path = self.config_manager.get("library_path") or self.config_manager.get("path", "")
+
+            if not self.library_path or not os.path.exists(self.library_path):
                  default_path = os.path.join(os.getcwd(), "Suno_Downloads")
                  if os.path.exists(default_path):
-                     self.download_path = default_path
+                     self.library_path = default_path
                  else:
                      return
                 
-            logger.debug("Starting scan of: %s", self.download_path)
+            logger.debug("Starting scan of: %s", self.library_path)
             self.is_scanning = True
             self.refresh_btn.configure(state="disabled")
             self.count_label.configure(text="Scanning...")
@@ -237,11 +257,11 @@ class LibraryTab(ctk.CTkFrame):
         new_songs = []
         count = 0
         try:
-             if not os.path.exists(self.download_path):
+             if not os.path.exists(self.library_path):
                  self.scan_queue.put(("done", None))
                  return
 
-             for root, dirs, files in os.walk(self.download_path):
+             for root, dirs, files in os.walk(self.library_path):
                 for file in files:
                     if file.lower().endswith(('.mp3', '.wav')):
                         filepath = os.path.join(root, file)
@@ -586,13 +606,62 @@ class LibraryTab(ctk.CTkFrame):
         # TODO: Implement scrolling to song card if visible
         pass
 
+    def rebuild_from_disk(self):
+        """Walk library_path, ID3-read every audio file, and reconcile the
+        manifest: add unknown UUIDs and update filepaths for UUIDs that have
+        moved (e.g., into a subfolder)."""
+        if self.manifest is None:
+            messagebox.showinfo("Rebuild", "Manifest not initialized.")
+            return
+        if not self.library_path or not os.path.isdir(self.library_path):
+            messagebox.showerror("Rebuild", f"Library folder not found:\n{self.library_path}")
+            return
+        from core.manifest import LOCATION_LIBRARY
+        result = self.manifest.upsert_from_disk(self.library_path, LOCATION_LIBRARY)
+        self.refresh_library()
+        messagebox.showinfo(
+            "Rebuild from Disk",
+            f"Scanned {result['scanned']} file(s).\n"
+            f"Added {result['added']} new manifest entries.\n"
+            f"Updated paths for {result['updated']} moved entries.",
+        )
+
+    def forget_missing(self):
+        """Drop every library-location manifest entry whose file is gone, so
+        those songs become re-downloadable. Common after manually deleting
+        files or moving the library folder."""
+        if self.manifest is None:
+            messagebox.showinfo("Forget Missing", "Manifest not initialized.")
+            return
+        from core.manifest import LOCATION_LIBRARY
+        candidates = [
+            e for e in self.manifest.by_location(LOCATION_LIBRARY)
+            if not (e.get("filepath") and os.path.exists(e["filepath"]))
+        ]
+        if not candidates:
+            messagebox.showinfo("Forget Missing", "No missing library entries to forget.")
+            return
+        if not messagebox.askyesno(
+            "Forget Missing",
+            f"Forget {len(candidates)} library entries whose files no longer exist?\n\n"
+            "These songs will become re-downloadable on the next sync. "
+            "Trashed UUIDs (permanent dismissals) are not affected.",
+        ):
+            return
+        removed = self.manifest.prune_missing_at(LOCATION_LIBRARY)
+        self.refresh_library()
+        messagebox.showinfo(
+            "Forget Missing",
+            f"Forgot {len(removed)} library entries. They can now be re-downloaded.",
+        )
+
     def open_download_folder(self):
         # Fetch fresh path from config
-        path = self.config_manager.get("path", "")
+        path = self.config_manager.get("library_path") or self.config_manager.get("path", "")
         if path and os.path.exists(path):
             open_file(path)
         else:
-            logger.warning("Download path invalid or not set: %s", path)
+            logger.warning("Library path invalid or not set: %s", path)
             
     def reload_tags(self):
         self._load_tags()

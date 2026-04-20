@@ -9,11 +9,12 @@ class SettingsTab(ctk.CTkFrame):
     """
     Global Application Settings View.
     """
-    def __init__(self, parent, config_manager, **kwargs):
+    def __init__(self, parent, config_manager, manifest=None, **kwargs):
         super().__init__(parent, fg_color="transparent", **kwargs)
         self.config_manager = config_manager
+        self.manifest = manifest
         self.card_bg = "#27272a"
-        
+
         # UI Setup
         self._setup_layout()
         self.load_settings()
@@ -65,6 +66,8 @@ class SettingsTab(ctk.CTkFrame):
         add_scan_row(1, "Start Page:", self.scan_start_var, "Library page to start scanning from")
         add_scan_row(2, "Max Pages:", self.scan_max_var, "Limit number of pages to scan (0 = Unlimited)")
         
+        # Trashed Songs UI lives in its own "Ignored" sidebar tab now.
+
         # --- Maintenance & Debugging ---
         self.maint_card = CollapsibleCard(self.container, title="Maintenance & Debugging", collapsed=False)
         self.maint_card.pack(fill="x", pady=10)
@@ -127,11 +130,17 @@ class SettingsTab(ctk.CTkFrame):
         
     def browse_folder(self):
         from tkinter import filedialog
-        path = filedialog.askdirectory(initialdir=self.path_var.get())
+        path = filedialog.askdirectory(initialdir=self.path_var.get(), title="Select Downloads Folder")
         if path:
             self.path_var.set(path)
-            self.path_display_var.set(path) # Simple set, no truncate for full path in settings? Or truncate?
-            # settings_card uses path_display_var for Entry.
+            self.path_display_var.set(path)
+
+    def browse_library_folder(self):
+        from tkinter import filedialog
+        path = filedialog.askdirectory(initialdir=self.library_path_var.get(), title="Select Library Folder")
+        if path:
+            self.library_path_var.set(path)
+            self.library_path_display_var.set(path)
             
     def clear_cache(self):
         # Access DownloaderTab logic
@@ -184,8 +193,12 @@ class SettingsTab(ctk.CTkFrame):
 
     def load_settings(self):
         c = self.config_manager
-        self.path_var.set(c.get("path", ""))
-        self.path_display_var.set(c.get("path", ""))
+        downloads = c.get("downloads_path") or c.get("path", "")
+        library = c.get("library_path") or c.get("path", "")
+        self.path_var.set(downloads)
+        self.path_display_var.set(downloads)
+        self.library_path_var.set(library)
+        self.library_path_display_var.set(library)
         
         self.embed_thumb_var.set(c.get("embed_metadata", True))
         self.download_wav_var.set(c.get("prefer_wav", False))
@@ -203,7 +216,8 @@ class SettingsTab(ctk.CTkFrame):
 
     def save_settings(self):
         c = self.config_manager
-        c.set("path", self.path_var.get())
+        c.set("downloads_path", self.path_var.get())
+        c.set("library_path", self.library_path_var.get())
         c.set("embed_metadata", self.embed_thumb_var.get())
         c.set("prefer_wav", self.download_wav_var.get())
         c.set("organize", self.organize_var.get())

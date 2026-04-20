@@ -620,6 +620,31 @@ def get_unique_filename(filename):
         counter += 1
 
 
+def reserve_unique_path(filename, max_attempts=200):
+    """Atomically reserve *filename* (or a `Title vN.ext` variant) by creating
+    a 0-byte file with O_CREAT|O_EXCL. Returns the reserved path. Race-safe
+    across threads and processes — unlike `get_unique_filename`, which has a
+    TOCTOU window between the existence check and the actual write that lets
+    two concurrent downloaders pick the same path and clobber each other.
+
+    Caller is responsible for opening the returned path for writing (the file
+    will be empty/truncatable). Raises RuntimeError if no unique name found
+    within max_attempts.
+    """
+    name, extn = os.path.splitext(filename)
+    candidate = filename
+    attempt = 1
+    while attempt <= max_attempts:
+        try:
+            fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+            return candidate
+        except FileExistsError:
+            attempt += 1
+            candidate = f"{name} v{attempt}{extn}"
+    raise RuntimeError(f"Could not reserve a unique filename starting from {filename!r} after {max_attempts} attempts")
+
+
 def get_downloaded_uuids(directory):
     """
     Return the set of SUNO_UUIDs found in .mp3 files under *directory*.
